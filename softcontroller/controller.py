@@ -1,17 +1,17 @@
 #!/usr/bin/env python
 
-verbose_joystick_stats = True
-show_joystick_stats = False
+_verbose_controller_stats = True
+_show_controller_stats = False
 
-def set_joystick_stats(on):
+def set_controller_stats(on):
     '''
-    Set the show_joystick_stats value which determines whether to output
-    keyboard statistics to the terminal on the next keypress.
+    Enable all controller messages continuously.
 
     Sequential arguments:
     on -- True for on, False for off
     '''
-    show_joystick_stats = on
+    global _verbose_controller_stats
+    _verbose_controller_stats = on
 
 class Controller:
     '''
@@ -150,7 +150,12 @@ class Controller:
             if got > 0:
                 return 1
             else:
-                return 0
+                return -1
+        else:
+            if _show_controller_stats:
+                print("sid {}: abs({})"
+                      " didn't get outside of self.deadZone"
+                      "".format(sid, got))
         return 0
 
     def toKeys(self):
@@ -189,9 +194,16 @@ class Controller:
         '''
         Sequential arguments:
         keycode -- a hardware keycode such as pygame.key.* constants
-        on -- True for pressed, False for released.
+        on -- True for pressed, False for released. If the key was
+              defined using addKeyAsAxisValue, then a True value
+              becomes the value you set at that time.
         '''
-        self._states[self._kc_to_sid[str(keycode)]] = int(on)
+        value = 0
+        if on:
+            value = self._kc_value.get(str(keycode))
+            if value is None:
+                value = int(on)
+        self._states[self._kc_to_sid[str(keycode)]] = value
 
     def setAxis(self, axis, value):
         '''
