@@ -102,6 +102,13 @@ class Controller:
         self._sid_to_ax[sid] = axisIndex
         self._states[sid] = 0
 
+    def getTrues(self):
+        results = []
+        for sid, v in self._states.items():
+            if self.getBool(sid):
+                results.append(sid)
+        return results
+
     def addButton(self, button, sid):
         '''
         Sequential arguments:
