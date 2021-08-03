@@ -54,6 +54,7 @@ class Controller:
 
     def __init__(self):
         self.deadZone = .2
+        self._firstButton = 1
         self._states = {}  # The state of each virtual actuator, usually
                            # -1.0 to 1.0 (or 0 or 1 for buttons, or any
                            # number of keyboard keys can affect it)
@@ -82,13 +83,17 @@ class Controller:
         fill in [bracketed] sids in the message, otherwise merely
         remove the brackets.
 
+        The default _firstButton is 1 (see button_name_if).
+
         Sequential arguments:
         message -- Format and return this string.
         enable_game_controller -- For succinct code, return a key if
                                   this is False. For example, pass
                                   controls.gamepad_used() as the value.
         keycode_to_str -- Optionally provide a callback method to use to
-                          convert a keycode to a key name string.
+                          convert a keycode to a key name string, such
+                          as pygame.key.name (call pygame.init() first
+                          or you'll get "unknown key").
         add_key_str -- Suffix " key" or " keys" after the result when
                        the result is a key.
         add_btn_str -- Prefix "button " before the result when the
@@ -103,6 +108,14 @@ class Controller:
         if keycode_to_str is None:
             keycode_to_str = _keycode_to_str_dummy
         keystr = keycode_to_str
+        btnOpening = opening
+        btnClosing = closing
+        if btnOpening is None:
+            btnOpening = ')'
+            opening = ""
+        if btnClosing is None:
+            btnClosing = ')'
+            closing = ""
         while True:
             oBI = message.find('[')  # opening bracket index
             cBI = -1
@@ -111,12 +124,6 @@ class Controller:
             if (cBI < 0):
                 return message
             sid = message[oBI+1:cBI]
-            btnOpening = opening
-            btnClosing = closing
-            if btnOpening is None:
-                btnOpening = ')'
-            if btnClosing is None:
-                btnClosing = ')'
             btnName = self.button_name_if(
                 sid,
                 enable_game_controller,
@@ -132,16 +139,30 @@ class Controller:
                         keycode = keycodes[0]
                 if keycode is not None:
                     btnName = keystr(keycode)
+                    if 'unknown' in btnName:
+                        error("Unknown keycode: {}"
+                              " (make sure you call pygame.init first"
+                              " if keycode_to_str is pygame.key.name)"
+                              "".format(keycodes))
                     if add_key_str:
                         btnName += " key"
-                else:
+                elif keycodes is not None:
                     btnName = '/'.join(keystr(i) for i in keycodes)
+                    if 'unknown' in btnName:
+                        error("Unknown keycodes: {}"
+                              " (make sure you call pygame.init first"
+                              " if keycode_to_str is pygame.key.name)"
+                              "".format('/'.join(str(i) for i in keycodes)))
                     if add_key_str:
                         btnName += " keys"
-                if opening is not None:
-                    btnName = opening + btnName
-                if closing is not None:
-                    btnName += closing
+                else:
+                    error("Warning: there are no keycodes for '{}'"
+                          " in {}".format(sid, self._sid_to_kcs))
+                if btnName is not None:
+                    if opening is not None:
+                        btnName = opening + btnName
+                    if closing is not None:
+                        btnName += closing
             if btnName is not None:
                 message = message.replace('[' + sid + ']', btnName)
             else:
@@ -150,6 +171,10 @@ class Controller:
     def button_name_if(self, sid, enable, opening="(", closing=")",
                        add_btn_str=True):
         '''
+        The default _firstButton is 1 (button 0 is named "1" and that
+        is what is returned; If the controller's buttons are labeled
+        starting at 0, set _firstButton to 0 first).
+
         Sequential arguments:
         sid -- Use this mapped virtual actuator from this controller.
         enable -- For succinct code, return None if this is False.
@@ -189,9 +214,10 @@ class Controller:
 
         if index is not None:
             typeStrPrefix = ""
+            indexStr = str(index + self._firstButton)
             if typeStr is not None:
                 typeStrPrefix = typeStr + " "
-            name = opening + typeStrPrefix + str(index) + closing
+            name = opening + typeStrPrefix + indexStr + closing
         return name
 
     def _raiseIfSidValueBad(self, sid):
