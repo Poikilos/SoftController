@@ -13,6 +13,9 @@ _show_controller_stats = False
 def error(msg):
     sys.stderr.write(str(msg)+"\n")
 
+def _keycode_to_str_dummy(keycode):
+    return str(keycode)
+
 def set_controllers_verbose(on):
     '''
     Enable all controller messages continuously.
@@ -64,10 +67,132 @@ class Controller:
 
         self._ax_to_sid = {}  # map joystick [axisIndex] to sid
         self._sid_to_ax = {}  # reverse map: [str(axis)] sid
+        self._axes = {}  # real hardware values for change tracking
 
         self._hat_to_sids = {}  # hat [hatID] values to sids: (sid, sid)
         self._sid_to_hat = {}  # reverse map: either axis sid to hatID
         self._inversions = {}  # hat [hatID]: if value is True invert y
+
+
+    def format(self, message, enable_game_controller,
+               keycode_to_str=None, add_key_str=True,
+               add_btn_str=False, opening="", closing=""):
+        '''
+        Use the mappings from this softcontroller.Controller instance to
+        fill in [bracketed] sids in the message, otherwise merely
+        remove the brackets.
+
+        Sequential arguments:
+        message -- Format and return this string.
+        enable_game_controller -- For succinct code, return a key if
+                                  this is False. For example, pass
+                                  controls.gamepad_used() as the value.
+        keycode_to_str -- Optionally provide a callback method to use to
+                          convert a keycode to a key name string.
+        add_key_str -- Suffix " key" or " keys" after the result when
+                       the result is a key.
+        add_btn_str -- Prefix "button " before the result when the
+                       result is a button.
+        opening -- Prefix it with this if present.
+                   Set it to None for '(' only on buttons, "" for
+                   never.
+        closing -- Suffix it with this if present.
+                   Set it to None for ')' only on buttons, "" for
+                   never.
+        '''
+        if keycode_to_str is None:
+            keycode_to_str = _keycode_to_str_dummy
+        keystr = keycode_to_str
+        while True:
+            oBI = message.find('[')  # opening bracket index
+            cBI = -1
+            if oBI >= 0:
+                cBI = message.find(']', oBI)  # closing bracket index
+            if (cBI < 0):
+                return message
+            sid = message[oBI+1:cBI]
+            btnOpening = opening
+            btnClosing = closing
+            if btnOpening is None:
+                btnOpening = ')'
+            if btnClosing is None:
+                btnClosing = ')'
+            btnName = self.button_name_if(
+                sid,
+                enable_game_controller,
+                opening=btnOpening,
+                closing=btnClosing,
+                add_btn_str=add_btn_str,
+            )
+            if btnName is None:
+                keycodes = self._sid_to_kcs.get(sid)
+                keycode = None
+                if keycodes is not None:
+                    if len(keycodes) == 1:
+                        keycode = keycodes[0]
+                if keycode is not None:
+                    btnName = keystr(keycode)
+                    if add_key_str:
+                        btnName += " key"
+                else:
+                    btnName = '/'.join(keystr(i) for i in keycodes)
+                    if add_key_str:
+                        btnName += " keys"
+                if opening is not None:
+                    btnName = opening + btnName
+                if closing is not None:
+                    btnName += closing
+            if btnName is not None:
+                message = message.replace('[' + sid + ']', btnName)
+            else:
+                message = message.replace('[' + sid + ']', sid)
+
+    def button_name_if(self, sid, enable, opening="(", closing=")",
+                       add_btn_str=True):
+        '''
+        Sequential arguments:
+        sid -- Use this mapped virtual actuator from this controller.
+        enable -- For succinct code, return None if this is False.
+                  For example, pass controls.gamepad_used() as the value.
+        opening -- Prefix the result with this.
+        closing -- Suffix the result with this.
+        add_btn_str -- Prefix the result with this (after opening).
+
+        Returns:
+        an actuator type (axis, button, or hat) then a space then the index,
+        all enclosed by opening&closing, otherwise None if enable is False
+        or the sid is not mapped to anything on this controller.
+        '''
+        if opening is None:
+            opening = ""
+        if closing is None:
+            closing = ""
+        name = None
+        if not enable:
+            return None
+        typeStr = None
+        index = self._sid_to_btn.get(sid)
+        if index is not None:
+            if add_btn_str:
+                typeStr = "button"
+            else:
+                typeStr = None
+        else:
+            index = self._sid_to_ax.get(sid)
+            if index is not None:
+                typeStr = "axis"
+            else:
+                # print("{} is not a button.".format(sid))
+                index = self._sid_to_hat.get(sid)
+                if index is not None:
+                    typeStr = "hat"
+
+        if index is not None:
+            typeStrPrefix = ""
+            if typeStr is not None:
+                typeStrPrefix = typeStr + " "
+            name = opening + typeStrPrefix + str(index) + closing
+        return name
 
     def _raiseIfSidValueBad(self, sid):
         msg = ("in {} '<' or '>' in sid are not allowed since they are"
@@ -299,6 +424,31 @@ class Controller:
         self._states[sid] = value
         return True
 
+    def isPastDeadZone(self, value):
+        if value is None:
+            # Maybe someone did _axes.get(unmappedAxisIndex)--that's ok:
+            # The value is stored by setAxis anyway if it was called
+            # even if the axisIndex is not mapped.
+            return False
+        return abs(value) > self.deadZone
+
+    def _getHWAxis(self, axis):
+        '''
+        Get a cached value of the hardware axis (not mapped!) such as
+        for comparison with a not yet set value. Since this is not
+        mapped, only use this method if you know you want the value from
+        a specific axis index.
+
+        Sequential arguments:
+        axis -- the unmapped hardware axis index
+
+        Returns:
+        The cached value of the axis from the last setAxis call that
+        used the same axis index, otherwise None.
+        '''
+        return self._axes.get(str(axis))
+
+
     def setAxis(self, axis, value):
         '''
         Set the value at the sid that you defined by addAxis
@@ -312,16 +462,19 @@ class Controller:
                  that gets a single value.
 
         returns:
-        True if the axis is mapped, otherwise False (The axis will not
-        set anything at all if it is not mapped to some sid)
+        1 if movement goes past the deadzone, 0 if not but the axis is
+        mapped, otherwise -1 if not mapped at all (The axis will not set
+        anything at all if it is not mapped to some sid)
         '''
         this_show_stats = _show_controller_stats
         if _verbose_controller_stats:
             this_show_stats = True
+        self._axes[str(axis)] = value
+        # ^ Save the hardware value even if the index is not mapped.
         sid = self._ax_to_sid.get(str(axis))
         if sid is None:
-            return False
-        if abs(value) > self.deadZone:
+            return -1
+        if self.isPastDeadZone(value):
             try:
                 tmp = float(value)
             except ValueError:
@@ -332,9 +485,10 @@ class Controller:
             if this_show_stats:
                 print("joystick axis {} = {}"
                       "".format(axis, value))
+            return 1
         else:
             self._states[sid] = 0
-        return True
+        return 0  # present but not actuated
 
     def setButton(self, button, on):
         '''
@@ -414,6 +568,8 @@ class Controller:
     def clearPressed(self):
         for sid in self._states.keys():
             self._states[sid] = 0
+        for k in self._axes.keys():
+            self._axes[k] = 0.0
 
 
 # endregion runtime
